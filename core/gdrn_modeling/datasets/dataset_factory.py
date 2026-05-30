@@ -10,6 +10,7 @@ from detectron2.data import DatasetCatalog, MetadataCatalog
 from core.gdrn_modeling.datasets import (
     lm_pbr,
     lmo_bop_test,
+    kitchen_pbr,
     ycbv_pbr,
     ycbv_d2,
     ycbv_bop_test,
@@ -41,6 +42,7 @@ __all__ = [
 _DSET_MOD_NAMES = [
     "lm_pbr",
     "lmo_bop_test",
+    "kitchen_pbr",
     "ycbv_pbr",
     "ycbv_d2",
     "ycbv_bop_test",
