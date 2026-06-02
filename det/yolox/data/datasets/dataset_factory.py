@@ -2,6 +2,7 @@ import logging
 import os.path as osp
 import mmcv
 from detectron2.data import DatasetCatalog
+from core.gdrn_modeling.datasets import custom_rgbd
 from . import (
     lm_pbr,
     lmo_bop_test,
@@ -34,6 +35,7 @@ __all__ = [
     "get_available_datasets",
 ]
 _DSET_MOD_NAMES = [
+    "custom_rgbd",
     "lm_pbr",
     "lmo_bop_test",
     "ycbv_pbr",

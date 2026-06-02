@@ -1,0 +1,1 @@
+from ..bop_pbr.yolox_base import *  # noqa
