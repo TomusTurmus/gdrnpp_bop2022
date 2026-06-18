@@ -52,22 +52,71 @@ RUN ${CONDA_DIR}/bin/conda create -y -n ${CONDA_ENV} python=${PYTHON_VERSION} &&
 SHELL ["/bin/bash", "-lc"]
 
 # Install into the target environment without relying on shell activation.
-RUN ${CONDA_DIR}/bin/conda install -y -n ${CONDA_ENV} -c pytorch -c nvidia pytorch torchvision pytorch-cuda=11.6 && \
+# PIN the torch family: an unpinned install resolves to the latest PyTorch
+# (2.4.x), which has NO CUDA-11.6 build and silently falls back to CPU-only.
+# torch 1.13.1 / torchvision 0.14.1 are the CUDA-11.6-era pair this repo expects.
+RUN ${CONDA_DIR}/bin/conda install -y -n ${CONDA_ENV} -c pytorch -c nvidia \
+    pytorch==1.13.1 torchvision==0.14.1 pytorch-cuda=11.6 && \
     ${CONDA_DIR}/bin/conda clean -ya
 
-# Install common Python build deps and pip
-RUN ${CONDA_DIR}/bin/conda install -y -n ${CONDA_ENV} pip cython numpy pyyaml scipy matplotlib scikit-image cffi && \
+# Install common Python build deps and pip. numpy pinned <2 to match torch 1.13
+# (numpy 2.x triggers the "compiled against API version 0xf" ABI warning).
+RUN ${CONDA_DIR}/bin/conda install -y -n ${CONDA_ENV} pip cython "numpy=1.23" pyyaml scipy matplotlib scikit-image cffi && \
     ${CONDA_DIR}/bin/conda clean -ya
+
+# pip >=24.1 strictly enforces PEP 440 and REJECTS packages with invalid metadata.
+# pytorch-lightning 1.x declares `torch (>=1.9.*)` (illegal: .* only with ==/!=),
+# so pip 24.1+ makes it uninstallable -> ResolutionImpossible -> the whole
+# requirements install aborts. Pin pip <24.1 so legacy metadata is tolerated.
+RUN ${CONDA_DIR}/bin/conda run -n ${CONDA_ENV} python -m pip install "pip<24.1"
 
 # Create workspace and copy repository (assumes build context includes repo root)
 WORKDIR /workspace
 COPY . /workspace
 
-# Run repository dependency installer and build native extensions.
+# Apply the torch lock to EVERY subsequent pip install (build + runtime container).
+# Any package demanding a different torch now fails loudly instead of silently
+# pulling torch 2.4.1+cu121 and breaking torchvision/detectron2.
+ENV PIP_CONSTRAINT=/workspace/requirements/constraints.txt
+
+# Run repository dependency installer (apt + pip -r requirements.txt).
 RUN chmod +x ./scripts/install_deps.sh ./scripts/compile_all.sh
 RUN ${CONDA_DIR}/bin/conda run -n ${CONDA_ENV} bash ./scripts/install_deps.sh
+
+# Guard: install_deps.sh has no `set -e`, so a partial requirements install would
+# pass silently. Fail the build here if any critical dep is missing or torch moved.
+RUN ${CONDA_DIR}/bin/conda run -n ${CONDA_ENV} python -c "\
+import torch, loguru, setproctitle, pytorch_lightning, timm, transforms3d, albumentations, open3d, cv2; \
+assert torch.__version__.startswith('1.13.1'), 'torch moved: '+torch.__version__; \
+from pytorch_lightning.lite.wrappers import _LiteModule; \
+print('requirements OK, torch', torch.__version__, 'pl', pytorch_lightning.__version__)"
+
+# CUDA-matched extras, kept out of requirements.txt so pip cannot resolve them
+# against a newer torch. mmcv-full is a prebuilt wheel for torch 1.13.1 / CUDA
+# 11.6 (no source build, no CPU fallback). detectron2 has no prebuilt wheel for
+# this combo, so it is built from source (v0.6) against the installed torch.
+# pytorch3d is intentionally NOT installed: it is listed in requirements.txt but
+# never imported anywhere in core/lib/ref, and its wheel install is fragile.
+RUN ${CONDA_DIR}/bin/conda run -n ${CONDA_ENV} pip install --no-cache-dir \
+    "mmcv-full==1.7.1" -f https://download.openmmlab.com/mmcv/dist/cu116/torch1.13.0/index.html
+RUN ${CONDA_DIR}/bin/conda run -n ${CONDA_ENV} pip install --no-cache-dir \
+    "git+https://github.com/facebookresearch/detectron2.git@v0.6"
+
+# Native extensions (build against the now-correct CUDA torch).
 RUN ${CONDA_DIR}/bin/conda run -n ${CONDA_ENV} bash ./core/csrc/uncertainty_pnp/build_ceres.sh
 RUN ${CONDA_DIR}/bin/conda run -n ${CONDA_ENV} bash ./scripts/compile_all.sh
+
+# pyassimp (Python) dlopen()s the native assimp library at import time. The repo's
+# install_deps.sh tries to apt-install it but runs after the package lists were
+# cleared, so it silently fails -> "assimp library not found". Install it here.
+RUN apt-get update && apt-get install -y --no-install-recommends libassimp-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Pin Pillow < 10 as the LAST step so nothing can override it. detectron2 0.6 (and
+# parts of this repo) use the `Image.LINEAR` alias, which was removed in Pillow 10
+# -> "module 'PIL.Image' has no attribute 'LINEAR'". 9.5.0 keeps the alias.
+RUN ${CONDA_DIR}/bin/conda run -n ${CONDA_ENV} pip install --no-cache-dir \
+    --force-reinstall "Pillow==9.5.0"
 
 ENV PATH="${CONDA_DIR}/envs/${CONDA_ENV}/bin:${PATH}"
 

@@ -48,12 +48,18 @@ fi
 
 # conda install ipython
 
-pip install -r requirements/requirements.txt
+# Fail loudly if the requirements install fails (the script has no `set -e`, so an
+# aborted resolve would otherwise pass silently and surface later as a missing module).
+pip install -r requirements/requirements.txt || { echo "=== REQUIREMENTS INSTALL FAILED ==="; exit 1; }
 
 # pip install kornia
 
-pip uninstall pillow
-CC="cc -mavx2" pip install -U --force-reinstall pillow-simd
+# pillow-simd is an optional faster drop-in for PIL. The original lines below
+# break non-interactive (Docker) builds: `pip uninstall pillow` (no -y) errors on
+# no stdin, and pillow-simd can fail to compile, leaving the env with no PIL.
+# Made non-fatal with a fallback to stock pillow.
+pip uninstall -y pillow || true
+CC="cc -mavx2" pip install -U --force-reinstall pillow-simd || pip install --force-reinstall pillow
 
 # install kaolin
 

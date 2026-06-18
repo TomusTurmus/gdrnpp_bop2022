@@ -1,0 +1,15 @@
+# Hard pins fed to EVERY pip install in the image (via PIP_CONSTRAINT in the
+# Dockerfile). This makes torch un-movable: any package that demands a different
+# torch will now FAIL loudly at build time instead of silently dragging in
+# torch 2.4.1+cu121 (which breaks torchvision and detectron2's compiled _C.so).
+# It also protects the running container: an unpinned `pip install pytorch_lightning`
+# resolves to a torch-1.13.1-compatible version (or errors) instead of torch 2.x.
+torch==1.13.1
+torchvision==0.14.1
+pytorch-lightning==1.7.7
+# PL 1.7.7 imports torchmetrics.utilities.imports._compare_version, removed in
+# torchmetrics 0.11. Pin to the last 0.10.x that still has it (and supports torch 1.13).
+torchmetrics==0.10.3
+# mmcv-full 1.7.1 calls yapf FormatCode(..., verify=True); yapf removed `verify`
+# in 0.40. Pin <0.40 so config dump (mmcv pretty_text) works.
+yapf==0.32.0

@@ -1,0 +1,15 @@
+# Keep the Docker build context small. These are bind-mounted at runtime
+# (output is 69 GB of weights) or are host-only artifacts.
+output/
+datasets/
+modelscope/
+.git/
+.cache/
+**/.cache/
+bop_renderer
+*.pth
+*.pkl
+**/__pycache__/
+# Compiled extensions are rebuilt inside the image; don't ship host builds.
+core/csrc/**/build/
+lib/egl_renderer/build/
