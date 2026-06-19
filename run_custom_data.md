@@ -212,45 +212,90 @@ container at the path the config expects):
 
 ## 4. Cup plumbing test (custom-data path)
 
-Proves data registration + image/depth/camera/CAD loading + detection feeding.
-Pose output is **meaningless** without cup weights — this validates wiring only.
+Proves data registration + image/depth/camera/CAD loading + detection feeding +
+forward pass + overlay. **Done ✅ 2026-06-19** (cup-as-ape proxy). Pose is rough —
+no cup weights — but localization tracks the cup; orientation is the proxy object's.
 
-### 4a. Stage the data
-Target layout (loader defaults; overridable in `custom_data_1.json`):
-```
-datasets/custom_data_1/
-├── rgb/                 # *.png frames
-├── depth/               # matching depth (stem.png or stem_depth.png), uint16 mm
-├── camera.json          # BOP scene_camera.json style, or {"cam_K":[...] } / per-frame
-├── models/
-│   ├── obj_000001.ply   # cup CAD in mm (BOP-style)
-│   └── models_info.json # key "1"
-└── objects.txt          # one object name per line (=> id 1.. in ref/custom_data_1.py)
-```
-- Cup RGB/depth source: `…/gigapose/gigaPose_datasets/datasets/realsense_cup/`.
-- Cup CAD: KITchen models under `/home/pose/dipl/datasets/KITchen/models/`
-  (`*Cup*`). BOP PLYs are **mm** → `scale_to_meter=0.001` (already set). Verify
-  `trimesh.load(ply).extents` is sane in mm.
-- **Object id must be 1** in `objects.txt` (first line), `models_info.json` key,
-  CAD filename `obj_000001.ply`, and detection `category_id`.
+**The checkpoint problem & the fix.** GDRNPP needs a checkpoint, and there is none
+for the cup. A class-aware checkpoint (e.g. 8-class lmo) won't load against a
+1-object custom config (head size mismatch). So use a **single-object (SO)
+checkpoint** — class-agnostic, 1-class → loads cleanly into a 1-object config. Pick
+an SO object as a stand-in and use **that object's CAD + train metadata** (the model
+predicts in the object's own frame). We used lmo **ape** (its CAD ~76×78×92 mm is
+close to the cup's ~90 mm). NB: the lmo **can** SO checkpoint was a **truncated
+download** (386 MB vs 410 MB, `zipfile.is_zipfile()==False`) — verify integrity
+before trusting any zoo file.
 
-### 4b. Provide detections
-The pose head needs a bbox per instance per frame. The config currently has
-`LOAD_DETS_TEST=False` and empty annotations → nothing to estimate. Options:
-- **Reuse existing CNOS/SAM-6D cup detections** (from the GigaPose run) — convert
-  to GDRNPP's expected `test_bboxes` JSON and set `LOAD_DETS_TEST=True` +
-  `DETECTIONS_TEST`, or
-- inject per-frame `annotations` with `bbox` + `bbox_mode` into a manifest
-  (`ann_file`) the loader reads (`_build_from_manifest`).
+### 4a. Stage the data (`tools/`-style one-off script)
+Layout under `datasets/custom_data_1/` (mounted into the container): `rgb/`,
+`depth/`, `camera.json` (`{"cam_K":[9], "depth_scale":..}`), `models/obj_000001.ply`
+(+ `models_info.json` key `"1"`), `objects.txt` (one name → id 1).
+- Cup RGB-D source: `…/FoundationPose/demo_data/realsense_cup/{rgb,depth,masks,camera.json}`.
+- **Stage only frames that have a mask** and **renumber them `000000..`** to match
+  `custom_rgbd`'s enumeration keying (`scene_im_id = "scene/<enum-index>"`).
+- `obj_000001.ply` = the **proxy object's** CAD (we copied lmo `obj_000001.ply` =
+  ape) + `models_info["1"]` = that object's info. BOP mm → `scale_to_meter=0.001`.
 
-### 4c. Run
+### 4b. Detections (reuse the masks you already have)
+Convert the per-frame masks to GDRNPP `test_bboxes` JSON: keyed `"scene/<enum-idx>"`
+→ `[{"bbox_est":[x,y,w,h], "obj_id":1, "score":1.0, "time":0.0}]` (bbox from
+`np.where(mask>0)`). Set `MODEL.LOAD_DETS_TEST=True` and
+`DATASETS.DET_FILES_TEST=("…/cup_detections.json",)`. Keying must match the staged
+frame indices exactly, or collate `KeyError`s.
+
+### 4c. Config + run
+`configs/custom_data_1/cup.json` (custom_rgbd data cfg: objs, ref_key, h=360/w=640,
+`with_depth=false`, `use_cache=false`) and `configs/gdrn/cup_as_can/cup.py`
+(`_base_` = the SO `ape.py` so the checkpoint matches; `TRAIN=("lmo_ape_train_pbr",)`
+for the renderer's CAD metadata; `TEST=("custom_cup",)`; **`TEST.SAVE_RESULTS_ONLY=True`
++ `VAL.SAVE_BOP_CSV_ONLY=True`** since there's no GT → skip BOP eval).
+
+Run with the **SO ape** checkpoint (mount `configs/`, the dataset loaders, `ref/`,
+plus the lmo data for the ape CAD; `--shm-size=16g`):
 ```bash
-./core/gdrn_modeling/test_gdrn.sh \
-  configs/gdrn/custom_data_1/convnext_a6_AugCosyAAEGray_BG05_mlL1_DMask_amodalClipBox_custom_data_1.py \
-  0 <some_weights.pth>
+sudo docker run --gpus all -it --rm --shm-size=16g \
+  -v $PWD/output:/workspace/output -v $PWD/datasets:/workspace/datasets \
+  -v /home/pose/dipl/datasets/lm-o:/workspace/datasets/BOP_DATASETS/lmo \
+  -v $PWD/configs:/workspace/configs \
+  -v $PWD/core/gdrn_modeling/datasets:/workspace/core/gdrn_modeling/datasets \
+  -v $PWD/ref:/workspace/ref  gdrnpp:cuda11.6
+# inside (yapf not baked yet -> reinstall once):
+pip install yapf==0.32.0
+./core/gdrn_modeling/test_gdrn.sh configs/gdrn/cup_as_can/cup.py 0 \
+  output/GDRNPP/gdrn/lmoPbrSO/convnext_AugCosyAAEGray_DMask_amodalClipBox_lmo/ape/model_final_wo_optim.pth
 ```
-Expect: dataset registers, frames load, forward pass runs, CSV emitted. Don't
-trust the poses.
+Output: `output/gdrn/cup_as_can/ape_on_cup/inference_*/custom_cup/results.pkl`
+(dict `"scene/im"` → `[{R(3×3), t(3,) in **meters**, obj_id, mask…}]`).
+
+### 4d. Visualize (FoundationPose-style overlay)
+`tools/vis_gdrn_custom.py` overlays a posed 3D box + XYZ axes (reusable for any
+custom_rgbd run). `t` is in **meters**; box corners come from `models_info` (mm→m).
+Run in an env with numpy+opencv (e.g. `gigapose`); write to a **host-writable** dir
+(`output/` is root-owned by the container):
+```bash
+conda activate gigapose
+python tools/vis_gdrn_custom.py \
+  --results output/gdrn/cup_as_can/ape_on_cup/inference_model_final_wo_optim/custom_cup/results.pkl \
+  --rgb_dir datasets/custom_data_1/rgb --camera datasets/custom_data_1/camera.json \
+  --models_info datasets/custom_data_1/models/models_info.json \
+  --out datasets/custom_data_1/vis --video
+```
+
+---
+
+## 4e. Open follow-ups (next steps)
+
+- [ ] **Bake the image** so runtime patches are permanent. `yapf==0.32.0` is in
+  `constraints.txt` but the live image still needs the in-container `pip install
+  yapf==0.32.0` each run. One consolidated rebuild fixes it:
+  `cd /home/pose/dipl/gdrnpp_bop2022 && sudo docker build -t gdrnpp:cuda11.6 -f docker/Dockerfile .`
+  (also bakes the lmo config `vsd`→drop + `RENDERER_TYPE=egl` edit). After this the
+  documented run commands work with zero manual steps.
+- [ ] **Real cup poses require training** — the cup-as-ape run (§4) is plumbing only;
+  there are no cup weights. Train on the cup/KITchen (see `train_model.md` / §6),
+  then run inference. The cup data is **RGB-D**, so the accuracy payoff is training
+  **+ `test_gdrn_depth_refine.sh`** (depth refinement is what lifts ADD from the
+  ~50% RGB-only level we saw on LM-O into the published range).
 
 ---
 
